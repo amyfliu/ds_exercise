@@ -1,0 +1,223 @@
+---
+title: "northwell_ds_exercise"
+author: "Fang Liu"
+date: "5/9/2022"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    hide: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(caret)
+library(rpart.plot) # for creating classification tree outputs
+library(glmnet)
+library(Amelia)
+library(pROC) #for calculating ROC/AUC
+library(gbm)
+library(stats)
+library(factoextra)
+library(cluster)
+library(gtsummary)
+```
+
+
+## Step 1 - Data Preparation 
+```{r}
+#load data
+heart_data <- read_csv("./HD.csv") 
+str(heart_data)
+
+#Strip off ID Variable
+heart_data$ID<-NULL
+
+#make sure the data is the right type
+heart_data <- heart_data %>% 
+  mutate(Sex = if_else(Sex == 1, "Male", "Female"),
+         Sex = factor(Sex),
+         ChestPain = factor(ChestPain),
+         Fbs = factor(Fbs),
+         ExAng = factor(ExAng),
+         Thal = factor(Thal),
+         HD = factor(HD))
+
+#check missing data
+missmap(heart_data, legend = FALSE, x.cex = 0.5, y.cex = 0.5) 
+#3 IDS missing 'Ca' and 2 IDs missing 'Thal' 
+
+#Remove missing (5 observations)
+heart_data <- na.omit(heart_data)
+
+#check if data is balanced
+summary(heart_data$HD) #data is balanced
+```
+
+## Step 2 - Exploratory Data Analysis 
+
+```{r}
+# create a descriptive table for ENTIRE dataset
+heart_data %>% 
+  tbl_summary(statistic = all_continuous() ~ "{mean} ({sd})")
+
+
+# split table by outcome (i.e., heart disease)
+heart_data %>% 
+  tbl_summary(by = HD,
+              statistic = all_continuous() ~ "{mean} ({sd})") %>% 
+  add_p(test = all_continuous() ~ "t.test",
+        test.args = all_tests("t.test") ~ list(var.equal = TRUE))
+
+#Quick plot comparing Sex across Outcome Groups
+ggplot(heart_data) +
+  geom_boxplot(aes(y=Chol, x=HD), fill = "lightblue") +
+  labs(title = "Distribution of serum cholestoral",
+       x = "Heart Disease Status",
+       y = "Serum cholesterol (mg/dl)") +
+  theme_classic()
+
+ggplot(heart_data) +
+  geom_boxplot(aes(y=RestBP, x=HD), fill = "salmon") +
+  labs(title = "Distribution of resting BP",
+       x = "Heart Disease Status",
+       y = "Resting BP(mm Hg)") +
+  theme_classic()
+```
+
+From the table above, we can see that individuals with heart diseases are generally older, are more likely to be male, and most of the times experience asymptomatic chest pain, have lower maximum heart rate, more likely to experience exercise-induced angina and have higher ST depression, greater #s of major vessels colored by fluorosopy, and experience more reversable defect. There is no statistically significant difference in resting blood pressure, serum cholesterol, and fasting blood sugar between those with and without heart disease. 
+
+
+## Step 2 - Construct Prediction Models (using caret package)
+
+### Data Partition (70 train: 30 test)
+```{r}
+set.seed(100)
+train_index <- createDataPartition(y=heart_data$HD, p=0.7, list=FALSE)
+train_data <- heart_data[train_index,] 
+test_data <- heart_data[-train_index,] 
+
+# Check if the distribution of heart disease status is similar in the training and test sets
+train_data %>%
+  group_by(HD) %>%
+  summarize(n = n()) %>%
+  mutate(percent = n/sum(n))
+
+test_data %>%
+  group_by(HD) %>%
+  summarize(n = n()) %>%
+  mutate(percent = n/sum(n))
+```
+
+### Model 1: Classification And Regression Trees (CART)
+```{r}
+set.seed(100)
+
+#hyperparmeter tuning: cp
+cp_grid <- expand.grid(cp = seq(from = 0.015, to = 0.1, by = 0.001))
+
+ctree_heart <- train(HD ~ ., data = train_data, method = "rpart",
+           trControl = trainControl("cv", number = 10,
+                                    summaryFunction = twoClassSummary,
+                                    classProbs = TRUE, 
+                                    savePredictions = "final"),
+           tuneGrid = cp_grid,
+           metric = "ROC")
+
+plot(ctree_heart)
+ctree_heart$bestTune
+confusionMatrix(ctree_heart)
+
+```
+
+
+### Model 2: Random Forest
+```{r}
+set.seed(100)
+
+#hyperparameter tuning: mtry
+mtry_grid <- expand.grid(.mtry=c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)) 
+
+#10-fold cross-validation
+rf_heart <- train(HD ~ ., data=train_data, method="rf",
+                  trControl=trainControl("cv", number=10,
+                                         summaryFunction = twoClassSummary,
+                                         classProbs = TRUE, 
+                                         savePredictions = "final"),
+                  tuneGrid=mtry_grid, 
+                  ntree=100,
+                  metric = "ROC")
+
+rf_heart$bestTune
+rf_heart$results
+confusionMatrix(rf_heart)
+```
+
+
+### Model 3: Elastic Net (regularized regression)
+```{r}
+set.seed(100)
+
+en_heart <- train(HD ~ .,data=train_data, method="glmnet", family="binomial", trControl = trainControl("cv", number=10,summaryFunction = twoClassSummary,
+                                         classProbs = TRUE, 
+                                         savePredictions = "final"), 
+                  tuneLength=10,
+                  metric = "ROC")
+
+en_heart$bestTune
+en_heart$results
+confusionMatrix(en_heart)
+```
+
+
+### Compare model performance
+
+The model with the highest mean cross validation score of AUC will be selected as the final model.
+```{r}
+#metric
+confusionMatrix(ctree_heart) #0.7885
+confusionMatrix(rf_heart) #0.7788
+confusionMatrix(en_heart) #0.8462
+
+#cross-validated ROC/AUC 
+mod_comparison <- resamples(list("Classification Tree" = ctree_heart,
+                             "Random Forest" = rf_heart,
+                             "Elastic Net" = en_heart))
+
+dotplot(mod_comparison, metric = "ROC")
+
+
+#en_heart$results %>% pull(ROC) %>% max()
+```
+
+**Model selection: ** Elastic Net is selected as the final model because it had the highest mean cross validation score (CV) for ROC of `r en_heart$results %>% pull(ROC) %>% max()` and also the highest accuracy of 0.8462. Elastic net performed better than random forest, though there is a lot of overlap in the 95% confidence intervals. 
+
+
+## Step 3 - Model Evaluation 
+```{r}
+test_pred <- predict(en_heart, newdata = test_data)
+test_pred_prob <- predict(en_heart, newdata = test_data, type = "prob")
+test_pred_df <- bind_cols(test_data, test_pred_prob)
+
+#Accuracy
+confusionMatrix(test_pred, test_data$HD, positive = "Yes")
+
+#ROC
+test_roc <- roc(HD ~ Yes, data = test_pred_df)
+
+ggroc(test_roc) +
+  theme_bw() +
+  labs(x = "Specificity", y = "Sensitivity", title = "Elastic Net Test AUC") +
+  geom_abline(aes(intercept = 1, slope = 1), linetype = "dashed")
+
+# AUC for the final model on the test set
+test_auc <- test_roc$auc
+test_auc
+```
+
+The AUC for the elastic net model in the test set is **`r test_auc`.** On the testing set, the accuracy is **0.8315** (95% CI: 0.7373, 0.9025), recall or sensitivity was **0.8049** and precision/PPV was **0.825**. 
+
