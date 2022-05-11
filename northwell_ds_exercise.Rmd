@@ -1,14 +1,14 @@
 ---
 title: "northwell_ds_exercise"
 author: "Fang Liu"
-date: "5/9/2022"
+date: "5/10/2022"
 output:
-  word_document:
-    toc: yes
   html_document:
     hide: yes
     toc: yes
     toc_float: yes
+  word_document:
+    toc: yes
 ---
 
 ```{r setup, include=FALSE}
@@ -16,15 +16,15 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
 library(caret)
-library(rpart.plot) # for creating classification tree outputs
 library(glmnet)
 library(Amelia)
-library(pROC) #for calculating ROC/AUC
-library(gbm)
+library(pROC) 
 library(stats)
 library(factoextra)
-library(cluster)
+#creating table 1
 library(gtsummary)
+library(flextable)
+library(officer)
 ```
 
 
@@ -62,18 +62,37 @@ summary(heart_data$HD) #data is balanced
 
 ```{r}
 # create a descriptive table for ENTIRE dataset
-heart_data %>% 
+all_table = heart_data %>% 
   tbl_summary(statistic = all_continuous() ~ "{mean} ({sd})")
 
-
 # split table by outcome (i.e., heart disease)
-heart_data %>% 
+separate_table = heart_data %>% 
   tbl_summary(by = HD,
               statistic = all_continuous() ~ "{mean} ({sd})") %>% 
   add_p(test = all_continuous() ~ "t.test",
         test.args = all_tests("t.test") ~ list(var.equal = TRUE))
 
-#Quick plot comparing Sex across Outcome Groups
+#output table to word
+all_tbl = all_table %>% 
+  as_flex_table() %>% 
+  theme_box()
+
+sep_tbl = separate_table %>% 
+  as_flex_table() %>% 
+  theme_box()
+
+read_docx() %>% 
+  body_add_flextable(all_tbl) %>% 
+  print("table1.docx")
+
+read_docx() %>% 
+  body_add_flextable(sep_tbl) %>% 
+  print("table2.docx")
+```
+
+```{r}
+#Quick plot to see distribution of variables
+#cholestrol 
 ggplot(heart_data) +
   geom_boxplot(aes(y=Chol, x=HD), fill = "lightblue") +
   labs(title = "Distribution of serum cholestoral",
@@ -81,6 +100,7 @@ ggplot(heart_data) +
        y = "Serum cholesterol (mg/dl)") +
   theme_classic()
 
+#resting blood pressure
 ggplot(heart_data) +
   geom_boxplot(aes(y=RestBP, x=HD), fill = "salmon") +
   labs(title = "Distribution of resting BP",
@@ -92,7 +112,7 @@ ggplot(heart_data) +
 From the table above, we can see that individuals with heart diseases are generally older, are more likely to be male, and most of the times experience asymptomatic chest pain, have lower maximum heart rate, more likely to experience exercise-induced angina and have higher ST depression, greater #s of major vessels colored by fluorosopy, and experience more reversable defect. There is no statistically significant difference in resting blood pressure, serum cholesterol, and fasting blood sugar between those with and without heart disease. 
 
 
-## Step 2 - Construct Prediction Models (using caret package)
+## Step 3 - Construct Prediction Models
 
 ### Data Partition (70 train: 30 test)
 ```{r}
@@ -130,8 +150,6 @@ ctree_heart <- train(HD ~ ., data = train_data, method = "rpart",
 
 plot(ctree_heart)
 ctree_heart$bestTune
-confusionMatrix(ctree_heart)
-
 ```
 
 
@@ -154,7 +172,6 @@ rf_heart <- train(HD ~ ., data=train_data, method="rf",
 
 rf_heart$bestTune
 rf_heart$results
-confusionMatrix(rf_heart)
 ```
 
 
@@ -169,8 +186,7 @@ en_heart <- train(HD ~ .,data=train_data, method="glmnet", family="binomial", tr
                   metric = "ROC")
 
 en_heart$bestTune
-en_heart$results
-confusionMatrix(en_heart)
+en_heart
 ```
 
 
@@ -178,7 +194,7 @@ confusionMatrix(en_heart)
 
 The model with the highest mean cross validation score of AUC will be selected as the final model.
 ```{r}
-#metric
+#accuracy
 confusionMatrix(ctree_heart) #0.7885
 confusionMatrix(rf_heart) #0.7788
 confusionMatrix(en_heart) #0.8462
@@ -190,14 +206,15 @@ mod_comparison <- resamples(list("Classification Tree" = ctree_heart,
 
 dotplot(mod_comparison, metric = "ROC")
 
-
+#ctree_heart$results %>% pull(ROC) %>% max()
+#rf_heart$results %>% pull(ROC) %>% max()
 #en_heart$results %>% pull(ROC) %>% max()
 ```
 
 **Model selection: ** Elastic Net is selected as the final model because it had the highest mean cross validation score (CV) for ROC of `r en_heart$results %>% pull(ROC) %>% max()` and also the highest accuracy of 0.8462. Elastic net performed better than random forest, though there is a lot of overlap in the 95% confidence intervals. 
 
 
-## Step 3 - Model Evaluation 
+## Step 4 - Model Evaluation 
 ```{r}
 test_pred <- predict(en_heart, newdata = test_data)
 test_pred_prob <- predict(en_heart, newdata = test_data, type = "prob")
@@ -217,6 +234,8 @@ ggroc(test_roc) +
 # AUC for the final model on the test set
 test_auc <- test_roc$auc
 test_auc
+
+varImp(en_heart)
 ```
 
 The AUC for the elastic net model in the test set is **`r test_auc`.** On the testing set, the accuracy is **0.8315** (95% CI: 0.7373, 0.9025), recall or sensitivity was **0.8049** and precision/PPV was **0.825**. 
